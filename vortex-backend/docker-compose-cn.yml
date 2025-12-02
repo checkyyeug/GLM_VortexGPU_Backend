@@ -1,0 +1,40 @@
+services:
+  vortex-backend:
+    image: registry.cn-hangzhou.aliyuncs.com/nvidia/cuda:12.0-devel-ubuntu22.04
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vortex-backend
+    ports:
+      - "8080:8080"  # HTTP API
+      - "8081:8081"  # WebSocket
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      - ./config:/etc/vortex:ro
+      - ./audio_files:/home/vortex/audio:rw
+      - ./logs:/home/vortex/logs:rw
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # 简化的Redis缓存
+  redis:
+    image: registry.cn-hangzhou.aliyuncs.com/library/redis:7-alpine
+    container_name: vortex-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  audio_files:
+  logs:

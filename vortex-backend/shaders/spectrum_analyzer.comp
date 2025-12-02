@@ -1,0 +1,394 @@
+#version 460 core
+// SPDX-License-Identifier: MIT
+// Vortex GPU Audio Backend - Spectrum Analysis Compute Shader
+// Optimized for real-time audio spectrum analysis with 60+ FPS performance
+
+// Workgroup size configuration
+layout(local_size_x = 256) in;
+
+// Input audio buffer
+layout(binding = 0) readonly buffer AudioBuffer {
+    float audioData[];
+};
+
+// Output spectrum buffers (real and imaginary parts)
+layout(binding = 1) writeonly buffer SpectrumReal {
+    float spectrumReal[];
+};
+
+layout(binding = 2) writeonly buffer SpectrumImag {
+    float spectrumImag[];
+};
+
+// Window function buffer (precomputed)
+layout(binding = 3) readonly buffer WindowFunction {
+    float windowCoeffs[];
+};
+
+// Frequency magnitude output (for visualization)
+layout(binding = 4) writeonly buffer MagnitudeBuffer {
+    float magnitudes[];
+};
+
+// Configuration constants
+layout(push_constant) uniform SpectrumConfig {
+    uint numSamples;        // Number of samples per channel
+    uint numChannels;       // Number of audio channels
+    uint fftSize;          // FFT size (power of 2)
+    uint spectrumSize;     // Number of frequency bins (fftSize/2)
+    uint channelIndex;     // Current channel being processed
+    uint windowType;       // Window function type (0=Rect,1=Hanning,2=Hamming,3=Blackman)
+    float windowSize;      // Window size factor
+    float sampleRate;      // Audio sample rate
+    float frequencyScale;  // Frequency scaling factor
+    float amplitudeScale;  // Amplitude scaling factor
+    float minFrequency;    // Minimum frequency for logarithmic scaling
+    float maxFrequency;    // Maximum frequency for logarithmic scaling
+    uint numOutputBins;    // Number of output frequency bins
+    bool enableLogarithmic;// Enable logarithmic frequency scaling
+    bool applyWindowing;   // Apply window function
+    bool normalizeOutput;  // Normalize output magnitudes
+} config;
+
+// Shared memory for FFT computation
+shared float sharedReal[512];
+shared float sharedImag[512];
+
+// Complex number operations
+struct Complex {
+    float real;
+    float imag;
+};
+
+// Complex multiplication
+Complex complexMul(Complex a, Complex b) {
+    return Complex(
+        a.real * b.real - a.imag * b.imag,
+        a.real * b.imag + a.imag * b.real
+    );
+}
+
+// Complex addition
+Complex complexAdd(Complex a, Complex b) {
+    return Complex(a.real + b.real, a.imag + b.imag);
+}
+
+// Complex subtraction
+Complex complexSub(Complex a, Complex b) {
+    return Complex(a.real - b.real, a.imag - b.imag);
+}
+
+// Compute magnitude of complex number
+float complexMagnitude(Complex c) {
+    return sqrt(c.real * c.real + c.imag * c.imag);
+}
+
+// Convert magnitude to dB
+float magnitudeToDB(float magnitude) {
+    const float minDB = -120.0;
+    if (magnitude <= 0.0) {
+        return minDB;
+    }
+    float db = 20.0 * log(magnitude);
+    return max(db, minDB);
+}
+
+// Twiddle factor computation for FFT
+Complex twiddle(uint n, uint k) {
+    float angle = -2.0 * 3.14159265359 * float(k) / float(n);
+    return Complex(cos(angle), sin(angle));
+}
+
+// Bit reversal function for FFT
+uint bitReverse(uint n, uint bits) {
+    uint reversed = 0;
+    for (uint i = 0; i < bits; i++) {
+        reversed = (reversed << 1) | (n & 1);
+        n >>= 1;
+    }
+    return reversed;
+}
+
+// Cooley-Tukey FFT algorithm (in-place)
+void fftRadix2(Complex[] data, uint n) {
+    // Bit-reversal permutation
+    uint bits = uint(log2(float(n)));
+    for (uint i = 0; i < n; i++) {
+        uint j = bitReverse(i, bits);
+        if (i < j) {
+            Complex temp = data[i];
+            data[i] = data[j];
+            data[j] = temp;
+        }
+    }
+
+    // FFT computation
+    for (uint len = 2; len <= n; len *= 2) {
+        float angle = -2.0 * 3.14159265359 / len;
+        Complex wlen = Complex(cos(angle), sin(angle));
+
+        for (uint i = 0; i < n; i += len) {
+            Complex w = Complex(1.0, 0.0);
+            for (uint j = 0; j < len / 2; j++) {
+                Complex u = data[i + j];
+                Complex v = complexMul(data[i + j + len/2], w);
+
+                data[i + j] = complexAdd(u, v);
+                data[i + j + len/2] = complexSub(u, v);
+
+                w = complexMul(w, wlen);
+            }
+        }
+    }
+}
+
+// Hann window function
+float hanningWindow(uint n, uint N) {
+    return 0.5 * (1.0 - cos(2.0 * 3.14159265359 * float(n) / float(N - 1)));
+}
+
+// Hamming window function
+float hammingWindow(uint n, uint N) {
+    return 0.54 - 0.46 * cos(2.0 * 3.14159265359 * float(n) / float(N - 1));
+}
+
+// Blackman window function
+float blackmanWindow(uint n, uint N) {
+    float a0 = 0.42;
+    float a1 = 0.5;
+    float a2 = 0.08;
+    float ratio = float(n) / float(N - 1);
+    return a0 - a1 * cos(2.0 * 3.14159265359 * ratio) + a2 * cos(4.0 * 3.14159265359 * ratio);
+}
+
+// Apply window function to sample
+float applyWindow(float sample, uint index, uint N) {
+    if (!config.applyWindowing) {
+        return sample;
+    }
+
+    switch (config.windowType) {
+        case 1: // Hanning
+            return sample * hanningWindow(index, N);
+        case 2: // Hamming
+            return sample * hammingWindow(index, N);
+        case 3: // Blackman
+            return sample * blackmanWindow(index, N);
+        case 0: // Rectangular (no windowing)
+        default:
+            return sample;
+    }
+}
+
+// Map linear frequency bin to logarithmic output bin
+uint frequencyToLogBin(float frequency) {
+    if (!config.enableLogarithmic) {
+        return uint(frequency / config.sampleRate * config.fftSize);
+    }
+
+    if (frequency <= config.minFrequency) {
+        return 0;
+    }
+    if (frequency >= config.maxFrequency) {
+        return config.numOutputBins - 1;
+    }
+
+    // Logarithmic mapping
+    float logMin = log(config.minFrequency);
+    float logMax = log(config.maxFrequency);
+    float logFreq = log(frequency);
+
+    float normalized = (logFreq - logMin) / (logMax - logMin);
+    return uint(normalized * float(config.numOutputBins - 1));
+}
+
+// Main compute shader
+void main() {
+    uint globalId = gl_GlobalInvocationID.x;
+    uint localId = gl_LocalInvocationID.x;
+    uint workgroupId = gl_WorkGroupID.x;
+
+    // Each workgroup processes one channel
+    uint channel = workgroupId % config.numChannels;
+    if (channel != config.channelIndex) {
+        return; // Skip if not the target channel
+    }
+
+    // Load audio samples into shared memory
+    uint samplesPerThread = config.numSamples / gl_WorkGroupSize.x;
+    uint startSample = localId * samplesPerThread;
+
+    // Initialize complex data array
+    Complex[] fftData = new Complex[config.fftSize];
+
+    // Load and window audio samples
+    for (uint i = 0; i < samplesPerThread && (startSample + i) < config.numSamples; i++) {
+        uint sampleIndex = (startSample + i) * config.numChannels + channel;
+        float windowedSample = applyWindow(audioData[sampleIndex], startSample + i, config.numSamples);
+
+        fftData[startSample + i] = Complex(windowedSample, 0.0);
+    }
+
+    // Zero-pad if necessary
+    for (uint i = config.numSamples; i < config.fftSize; i++) {
+        fftData[i] = Complex(0.0, 0.0);
+    }
+
+    // Synchronize threads before FFT
+    barrier();
+
+    // Perform FFT
+    fftRadix2(fftData, config.fftSize);
+
+    // Synchronize threads after FFT
+    barrier();
+
+    // Compute magnitudes and write to output buffers
+    uint outputBinsPerThread = config.numOutputBins / gl_WorkGroupSize.x;
+    uint startBin = localId * outputBinsPerThread;
+
+    for (uint i = 0; i < outputBinsPerThread && (startBin + i) < config.numOutputBins; i++) {
+        uint outputBin = startBin + i;
+
+        // For logarithmic scaling, we need to find the corresponding FFT bins
+        float frequency;
+        uint fftBin;
+
+        if (config.enableLogarithmic) {
+            // Convert output bin back to frequency, then to FFT bin
+            float logMin = log(config.minFrequency);
+            float logMax = log(config.maxFrequency);
+            float normalized = float(outputBin) / float(config.numOutputBins - 1);
+            frequency = exp(logMin + normalized * (logMax - logMin));
+            fftBin = uint(frequency / config.sampleRate * config.fftSize);
+        } else {
+            // Linear scaling
+            frequency = float(outputBin) * config.sampleRate / config.fftSize;
+            fftBin = outputBin;
+        }
+
+        // Clamp FFT bin to valid range
+        fftBin = min(fftBin, config.spectrumSize - 1);
+
+        // Get complex FFT output
+        Complex fftValue = fftData[fftBin];
+
+        // Compute magnitude
+        float magnitude = complexMagnitude(fftValue);
+
+        // Apply scaling
+        magnitude *= config.amplitudeScale;
+
+        // Normalize if requested
+        if (config.normalizeOutput) {
+            magnitude /= float(config.fftSize);
+        }
+
+        // Convert to dB
+        float magnitudeDB = magnitudeToDB(magnitude);
+
+        // Write to global buffers
+        uint globalIndex = outputBin + channel * config.numOutputBins;
+        spectrumReal[globalIndex] = fftValue.real;
+        spectrumImag[globalIndex] = fftValue.imag;
+        magnitudes[globalIndex] = magnitudeDB;
+    }
+
+    // Clean up
+    delete[] fftData;
+}
+
+// Specialized functions for performance optimization
+
+// Optimized FFT for power-of-2 sizes using butterfly operations
+void optimizedFFT(Complex[] data, uint n) {
+    uint bits = uint(log2(float(n)));
+
+    // Bit-reversal stage
+    for (uint i = 0; i < n; i++) {
+        uint j = bitReverse(i, bits);
+        if (i < j) {
+            Complex temp = data[i];
+            data[i] = data[j];
+            data[j] = temp;
+        }
+    }
+
+    // Cooley-Tukey butterfly stages
+    uint len = 2;
+    while (len <= n) {
+        float angle = -2.0 * 3.14159265359 / len;
+        Complex wlen = Complex(cos(angle), sin(angle));
+
+        for (uint i = 0; i < n; i += len) {
+            Complex w = Complex(1.0, 0.0);
+            uint halfLen = len / 2;
+
+            for (uint j = 0; j < halfLen; j++) {
+                uint idx1 = i + j;
+                uint idx2 = i + j + halfLen;
+
+                Complex u = data[idx1];
+                Complex v = complexMul(data[idx2], w);
+
+                data[idx1] = complexAdd(u, v);
+                data[idx2] = complexSub(u, v);
+
+                w = complexMul(w, wlen);
+            }
+        }
+
+        len *= 2;
+    }
+}
+
+// SIMD-like vectorized operations for improved performance
+void vectorizedWindow(float[] samples, uint n) {
+    // Process 4 samples at a time for better memory access patterns
+    uint vectorSize = 4;
+    uint vectorCount = n / vectorSize;
+
+    for (uint i = 0; i < vectorCount; i++) {
+        uint baseIndex = i * vectorSize;
+
+        // Load 4 samples
+        float s0 = samples[baseIndex];
+        float s1 = samples[baseIndex + 1];
+        float s2 = samples[baseIndex + 2];
+        float s3 = samples[baseIndex + 3];
+
+        // Apply window coefficients
+        if (config.applyWindowing && baseIndex < config.windowCoeffs.length()) {
+            s0 *= config.windowCoeffs[baseIndex];
+            s1 *= config.windowCoeffs[baseIndex + 1];
+            s2 *= config.windowCoeffs[baseIndex + 2];
+            s3 *= config.windowCoeffs[baseIndex + 3];
+        }
+
+        // Store back
+        samples[baseIndex] = s0;
+        samples[baseIndex + 1] = s1;
+        samples[baseIndex + 2] = s2;
+        samples[baseIndex + 3] = s3;
+    }
+
+    // Handle remaining samples
+    for (uint i = vectorCount * vectorSize; i < n; i++) {
+        if (config.applyWindowing && i < config.windowCoeffs.length()) {
+            samples[i] *= config.windowCoeffs[i];
+        }
+    }
+}
+
+// High-performance magnitude calculation with approximations
+float fastMagnitude(Complex c) {
+    // Approximate magnitude for better performance
+    float absReal = abs(c.real);
+    float absImag = abs(c.imag);
+
+    if (absReal > absImag) {
+        return absReal + 0.5 * absImag;
+    } else {
+        return absImag + 0.5 * absReal;
+    }
+}

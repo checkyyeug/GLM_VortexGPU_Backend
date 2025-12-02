@@ -1,0 +1,101 @@
+# C++ build artifacts
+build/
+bin/
+obj/
+out/
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.exe
+*.dll
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.map
+
+# C++ compilation artifacts
+*.rs.bk
+*.rlib
+*.prof*
+
+# Rust build artifacts
+target/
+debug/
+release/
+Cargo.lock
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Configuration files with sensitive data
+*.env
+*.env.local
+*.env.production
+config/local.json
+secrets/
+
+# Log files
+*.log
+logs/
+*.out
+
+# Temporary files
+*.tmp
+*.temp
+*.cache
+*.pid
+
+# Audio processing files
+*.ir
+test_files/
+audio_samples/
+
+# GPU specific files
+*.gpu
+*.ptx
+*.bin
+
+# Documentation build
+docs/build/
+docs/.build/
+
+# OS specific
+.DS_Store
+Thumbs.db
+*.tmp~
+
+# Profiling and benchmarking
+*.prof
+*.profile
+*.bench
+
+# Coverage reports
+coverage/
+*.lcov
+*.gcov
+*.gcda
+*.gcno
+
+# Package manager files
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Docker
+.dockerignore
+*.dockerignore
+
+# Backup files
+*.bak
+*.backup
+*.old

@@ -1,0 +1,232 @@
+syntax = "proto3";
+
+package vortex.audio.websocket;
+
+// Vortex GPU Audio Backend WebSocket Protocol
+// Real-time audio data streaming and control messages
+
+// Main message wrapper for all WebSocket communications
+message WebSocketMessage {
+  uint64 timestamp = 1;           // UNIX epoch milliseconds
+  string type = 2;                // Message type identifier
+  oneof payload {
+    SpectrumData spectrum = 3;
+    WaveformData waveform = 4;
+    VUMeterData meters = 5;
+    HardwareStatus hardware = 6;
+    FilterStatus filter = 7;
+    ControlCommand command = 8;
+    ConnectionStatus connection = 9;
+    SystemAlert alert = 10;
+  }
+}
+
+// Real-time spectrum analysis data (2048-point FFT)
+message SpectrumData {
+  repeated float bins = 1;        // 2048 frequency bins (20Hz-20kHz)
+  float frequency_range[2] = 2;   // [min, max] frequency range in Hz
+  float amplitude_range[2] = 3;   // [min, max] amplitude range in dB
+  uint32 fft_size = 4;            // FFT size (typically 2048)
+  float window_overlap = 5;       // Overlap factor (0.75 typical)
+  uint32 sample_rate = 6;         // Current sample rate
+}
+
+// Real-time waveform data (4096 samples)
+message WaveformData {
+  repeated float left_channel = 1; // 4096 samples for left channel
+  repeated float right_channel = 2; // 4096 samples for right channel
+  uint32 sample_rate = 3;         // Current sample rate
+  uint16 bit_depth = 4;           // Current bit depth
+  float peak_levels[2] = 5;       // [left, right] peak levels in dBFS
+  uint32 buffer_size = 6;         // Number of samples per channel
+}
+
+// VU/PPM/Peak meter data
+message VUMeterData {
+  float vu_levels[2] = 1;         // [left, right] VU levels (-60 to 0 dB)
+  float peak_levels[2] = 2;       // [left, right] peak hold levels in dBFS
+  float rms_levels[2] = 3;        // [left, right] RMS levels in dBFS
+  float stereo_correlation = 4;   // Mono compatibility measure (-1 to 1)
+  float dynamic_range = 5;        // Current dynamic range in dB
+  float peak_hold_time = 6;       // Peak hold duration in seconds
+}
+
+// Hardware monitoring data
+message HardwareStatus {
+  GPUStatus gpu = 1;
+  NPUStatus npu = 2;
+  CPUStatus cpu = 3;
+  MemoryStatus memory = 4;
+  LatencyAnalysis latency = 5;
+  uint64 uptime = 6;              // System uptime in milliseconds
+}
+
+message GPUStatus {
+  float utilization = 1;          // GPU utilization percentage (0-100)
+  uint64 memory_used = 2;         // GPU memory used in MB
+  uint64 memory_total = 3;        // Total GPU memory in MB
+  float temperature = 4;          // GPU temperature in Celsius
+  float power_usage = 5;          // Power consumption in Watts
+  float clock_speed = 6;          // Current clock speed in MHz
+  uint32 active_cores = 7;        // Number of active GPU cores
+  string gpu_name = 8;            // GPU model name
+  float memory_bandwidth = 9;     // Memory bandwidth utilization in GB/s
+}
+
+message NPUStatus {
+  float utilization = 1;          // NPU utilization percentage (0-100)
+  uint64 memory_used = 2;         // NPU memory used in MB
+  float power_consumption = 3;    // Power consumption in Watts
+  float temperature = 4;          // NPU temperature in Celsius
+  string npu_type = 5;            // NPU type/model
+}
+
+message CPUStatus {
+  float utilization = 1;          // CPU utilization percentage (0-100)
+  repeated float cores = 2;       // Per-core utilization percentages
+  float temperature = 3;          // CPU temperature in Celsius
+  float clock_speed = 4;          // Current clock speed in MHz
+  uint32 active_threads = 5;      // Number of active threads
+  string cpu_model = 6;           // CPU model name
+}
+
+message MemoryStatus {
+  uint64 total_memory = 1;        // Total system memory in MB
+  uint64 used_memory = 2;         // Used system memory in MB
+  uint64 audio_memory = 3;        // Audio processing memory in MB
+  uint64 gpu_memory = 4;          // GPU memory usage in MB
+  float memory_pressure = 5;      // Memory pressure indicator (0-1)
+}
+
+message LatencyAnalysis {
+  float total_latency = 1;        // Total end-to-end latency in ms
+  float input_latency = 2;        // Input buffer latency in ms
+  float processing_latency = 3;   // Audio processing latency in ms
+  float output_latency = 4;       // Output buffer latency in ms
+  float network_latency = 5;      // Network transmission latency in ms
+  uint32 dropped_frames = 6;      // Number of dropped frames
+}
+
+// Filter status updates
+message FilterStatus {
+  string filter_id = 1;           // Unique filter identifier
+  string name = 2;                // Filter display name
+  bool is_active = 3;             // Filter processing state
+  bool is_bypassed = 4;           // Bypass state
+  bool is_solo = 5;               // Solo state
+  float wet_mix = 6;              // Wet/dry mix (0-1)
+  map<string, float> parameters = 7; // Current parameter values
+  float cpu_usage = 8;            // Filter CPU usage percentage
+  float latency = 9;              // Filter processing latency in ms
+}
+
+// Client control commands
+message ControlCommand {
+  string command = 1;             // Command type
+  map<string, string> parameters = 2; // Command parameters
+}
+
+// Connection status and health
+message ConnectionStatus {
+  bool is_connected = 1;          // Connection state
+  uint64 connection_id = 2;       // Unique connection identifier
+  float round_trip_time = 3;      // Round-trip time in ms
+  uint32 frames_per_second = 4;   // Current update rate
+  float bandwidth_usage = 5;      // Bandwidth usage in Mbps
+  uint32 buffer_depth = 6;        // Client buffer depth in ms
+  string quality_level = 7;       // Current quality level
+}
+
+// System alerts and notifications
+message SystemAlert {
+  AlertLevel level = 1;           // Alert severity level
+  string code = 2;                // Alert code identifier
+  string message = 3;             // Human-readable message
+  string component = 4;           // Component generating alert
+  map<string, string> details = 5; // Additional alert details
+  uint64 duration = 6;            // Alert duration in ms (0 for persistent)
+}
+
+enum AlertLevel {
+  INFO = 0;
+  WARNING = 1;
+  ERROR = 2;
+  CRITICAL = 3;
+}
+
+// Client request messages
+message ClientRequest {
+  uint64 request_id = 1;          // Unique request identifier
+  string type = 2;                // Request type
+  oneof payload {
+    SetParameterRequest set_parameter = 3;
+    ToggleBypassRequest toggle_bypass = 4;
+    SetWetRequest set_wet = 5;
+    SubscribeRequest subscribe = 6;
+    UnsubscribeRequest unsubscribe = 7;
+  }
+}
+
+message SetParameterRequest {
+  string filter_id = 1;           // Target filter identifier
+  string parameter = 2;           // Parameter name
+  float value = 3;                // New parameter value
+}
+
+message ToggleBypassRequest {
+  string filter_id = 1;           // Target filter identifier
+}
+
+message SetWetRequest {
+  string filter_id = 1;           // Target filter identifier
+  float wet = 2;                  // Wet/dry mix value (0-1)
+}
+
+message SubscribeRequest {
+  repeated DataType data_types = 1; // Data types to subscribe to
+  uint32 update_rate = 2;         // Desired update rate in Hz
+  QualityLevel quality = 3;        // Data quality level
+}
+
+message UnsubscribeRequest {
+  repeated DataType data_types = 1; // Data types to unsubscribe from
+}
+
+enum DataType {
+  SPECTRUM = 0;
+  WAVEFORM = 1;
+  METERS = 2;
+  HARDWARE = 3;
+  FILTER_STATUS = 4;
+  ALL = 5;
+}
+
+enum QualityLevel {
+  LOW = 0;      // Reduced update rate, compressed data
+  MEDIUM = 1;   // Standard update rate, balanced quality
+  HIGH = 2;     // Maximum update rate, full quality
+  ULTRA = 3;    // Maximum quality, high bandwidth
+}
+
+// Server response messages
+message ServerResponse {
+  uint64 request_id = 1;          // Original request identifier
+  bool success = 2;               // Request success status
+  string message = 3;             // Response message
+  oneof payload {
+    ErrorDetails error = 4;
+    SubscriptionStatus subscription = 5;
+  }
+}
+
+message ErrorDetails {
+  string code = 1;                // Error code
+  string message = 2;             // Error description
+  map<string, string> details = 3; // Additional error details
+}
+
+message SubscriptionStatus {
+  repeated DataType active_subscriptions = 1; // Currently active subscriptions
+  uint32 actual_update_rate = 2;  // Actual update rate achieved
+  QualityLevel actual_quality = 3; // Actual quality level
+}

@@ -1,0 +1,83 @@
+[package]
+name = "vortex-backend-rust"
+version = "1.0.0"
+edition = "2021"
+authors = ["Vortex Audio Team <support@vortexaudio.com>"]
+description = "Rust network services for Vortex GPU Audio Backend"
+license = "Commercial"
+
+[lib]
+name = "vortex_network"
+crate-type = ["staticlib", "cdylib"]
+
+[[bin]]
+name = "vortex-network"
+path = "src/network/rust_main.rs"
+
+[dependencies]
+# HTTP server framework
+axum = { version = "0.7", features = ["json", "headers"] }
+tokio = { version = "1.0", features = ["full"] }
+tower = { version = "0.4", features = ["full"] }
+tower-http = { version = "0.5", features = ["full"] }
+hyper = { version = "1.0", features = ["full"] }
+
+# WebSocket support
+tokio-tungstenite = { version = "0.20", features = ["native-tls"] }
+tungstenite = { version = "0.20", features = ["native-tls"] }
+futures-util = "0.3"
+futures-channel = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+prost = { version = "0.12", features = ["derive"] }
+
+# Protocol Buffers
+prost-types = "0.12"
+
+# Async runtime
+async-trait = "1.0"
+pin-project-lite = "0.2"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# Networking
+mdns = "3.0"
+upnp = "0.4"
+reqwest = { version = "0.11", features = ["json"] }
+
+# System monitoring
+sysinfo = "0.29"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Configuration
+config = "0.14"
+dotenv = "0.15"
+
+# GPU monitoring (if available)
+[target.'cfg(target_os = "linux")'.dependencies]
+nvml-wrapper = "0.9"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+winapi = { version = "0.3", features = ["winuser", "winerror", "memoryapi", "processthreadsapi"] }
+
+# Build optimizations
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+debug = true
+overflow-checks = true

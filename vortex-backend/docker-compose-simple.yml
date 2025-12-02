@@ -1,0 +1,16 @@
+services:
+  vortex-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vortex-backend
+    ports:
+      - "8080:8080"  # HTTP API
+      - "8081:8081"  # WebSocket
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ./config:/etc/vortex:ro
+      - ./audio_files:/home/vortex/audio:rw
+      - ./logs:/home/vortex/logs:rw
+    restart: unless-stopped

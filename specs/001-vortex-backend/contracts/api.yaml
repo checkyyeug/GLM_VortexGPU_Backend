@@ -1,0 +1,805 @@
+openapi: 3.0.3
+info:
+  title: Vortex GPU Audio Backend API
+  description: High-performance audio processing backend with GPU acceleration
+  version: 1.0.0
+  contact:
+    name: Vortex Audio Team
+    email: support@vortexaudio.com
+  license:
+    name: Commercial License
+
+servers:
+  - url: http://localhost:8080/api
+    description: Development server
+  - url: https://api.vortexaudio.com/api
+    description: Production server
+
+paths:
+  # Audio File Management
+  /audio/upload:
+    post:
+      summary: Upload audio file for processing
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Audio file to upload
+      responses:
+        '200':
+          description: File uploaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AudioFileUploadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+
+  /audio/formats:
+    get:
+      summary: Get supported audio formats
+      responses:
+        '200':
+          description: Supported formats list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  formats:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AudioFormat'
+
+  /audio/{fileId}/metadata:
+    get:
+      summary: Get audio file metadata
+      parameters:
+        - name: fileId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Audio file metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AudioMetadata'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /audio/{fileId}/status:
+    get:
+      summary: Get audio file processing status
+      parameters:
+        - name: fileId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Processing status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AudioFileStatus'
+
+  # Player Control
+  /player/play:
+    post:
+      summary: Start audio playback
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                fileId:
+                  type: string
+                  description: Audio file ID to play (optional, uses current if not specified)
+                position:
+                  type: number
+                  format: float
+                  description: Start position in seconds
+      responses:
+        '200':
+          description: Playback started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaybackStatus'
+
+  /player/stop:
+    post:
+      summary: Stop audio playback
+      responses:
+        '200':
+          description: Playback stopped
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaybackStatus'
+
+  /player/pause:
+    post:
+      summary: Pause audio playback
+      responses:
+        '200':
+          description: Playback paused
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaybackStatus'
+
+  /player/seek:
+    post:
+      summary: Seek to specific position
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                position:
+                  type: number
+                  format: float
+                  description: Position in seconds
+      responses:
+        '200':
+          description: Seek completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaybackStatus'
+
+  /player/volume:
+    post:
+      summary: Set playback volume
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                volume:
+                  type: number
+                  format: float
+                  minimum: 0
+                  maximum: 1
+                  description: Volume level (0.0-1.0)
+      responses:
+        '200':
+          description: Volume set
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaybackStatus'
+
+  /player/position:
+    get:
+      summary: Get current playback position
+      responses:
+        '200':
+          description: Current playback position
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaybackPosition'
+
+  # Filter and Processing Chain Management
+  /filters:
+    get:
+      summary: Get available filter types
+      responses:
+        '200':
+          description: Available filters
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FilterDefinition'
+
+  /chain:
+    get:
+      summary: Get current processing chain
+      responses:
+        '200':
+          description: Current processing chain
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProcessingChain'
+
+  /chain/add:
+    post:
+      summary: Add filter to processing chain
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddFilterRequest'
+      responses:
+        '200':
+          description: Filter added
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProcessingChain'
+
+  /chain/{filterId}:
+    delete:
+      summary: Remove filter from processing chain
+      parameters:
+        - name: filterId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Filter removed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProcessingChain'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /chain/{filterId}/parameters:
+    put:
+      summary: Update filter parameters
+      parameters:
+        - name: filterId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateFilterParametersRequest'
+      responses:
+        '200':
+          description: Parameters updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FilterModule'
+
+  /chain/{filterId}/control:
+    post:
+      summary: Control filter state (bypass/solo/wet)
+      parameters:
+        - name: filterId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FilterControlRequest'
+      responses:
+        '200':
+          description: Filter state updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FilterModule'
+
+  # Output Device Management
+  /output/discover:
+    get:
+      summary: Discover available output devices
+      responses:
+        '200':
+          description: Discovered devices
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OutputDevice'
+
+  /output/select:
+    post:
+      summary: Select output device
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                deviceId:
+                  type: string
+                  description: Device ID to select
+      responses:
+        '200':
+          description: Device selected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OutputDeviceStatus'
+
+  /output/status:
+    get:
+      summary: Get current output device status
+      responses:
+        '200':
+          description: Output device status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OutputDeviceStatus'
+
+  # System Monitoring
+  /system/hardware:
+    get:
+      summary: Get hardware status
+      responses:
+        '200':
+          description: Hardware status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HardwareStatus'
+
+  /system/latency:
+    get:
+      summary: Get latency analysis
+      responses:
+        '200':
+          description: Latency analysis
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LatencyAnalysis'
+
+  /system/health:
+    get:
+      summary: Get system health status
+      responses:
+        '200':
+          description: System health
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemHealth'
+
+components:
+  schemas:
+    AudioFormat:
+      type: object
+      properties:
+        extension:
+          type: string
+        mimeType:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        maxSampleRate:
+          type: integer
+        maxBitDepth:
+          type: integer
+        maxChannels:
+          type: integer
+        isHighResolution:
+          type: boolean
+
+    AudioFileUploadResponse:
+      type: object
+      properties:
+        fileId:
+          type: string
+        name:
+          type: string
+        format:
+          $ref: '#/components/schemas/AudioFormat'
+        size:
+          type: integer
+        status:
+          type: string
+          enum: [uploaded, processing, ready, error]
+
+    AudioMetadata:
+      type: object
+      properties:
+        format:
+          type: string
+        codec:
+          type: string
+        bitrate:
+          type: integer
+        sampleRate:
+          type: integer
+        bitDepth:
+          type: integer
+        channels:
+          type: integer
+        duration:
+          type: number
+        title:
+          type: string
+        artist:
+          type: string
+        album:
+          type: string
+        year:
+          type: integer
+        genre:
+          type: string
+        track:
+          type: integer
+
+    AudioFileStatus:
+      type: object
+      properties:
+        fileId:
+          type: string
+        status:
+          type: string
+          enum: [idle, loading, ready, processing, error]
+        progress:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        error:
+          type: string
+
+    PlaybackStatus:
+      type: object
+      properties:
+        state:
+          type: string
+          enum: [stopped, playing, paused, seeking, buffering, error]
+        fileId:
+          type: string
+        position:
+          type: number
+          format: float
+        volume:
+          type: number
+          format: float
+        isMuted:
+          type: boolean
+
+    PlaybackPosition:
+      type: object
+      properties:
+        currentTime:
+          type: number
+          format: float
+        duration:
+          type: number
+          format: float
+        progress:
+          type: number
+          format: float
+
+    FilterDefinition:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+          enum: [equalizer, convolution, dsd_processor, resampler, compressor, limiter, delay, reverb, gate, custom]
+        description:
+          type: string
+        parameters:
+          type: array
+          items:
+            $ref: '#/components/schemas/ParameterDefinition'
+
+    ParameterDefinition:
+      type: object
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+          enum: [float, integer, boolean, string]
+        min:
+          type: number
+        max:
+          type: number
+        default:
+          type: number
+        step:
+          type: number
+        unit:
+          type: string
+
+    ProcessingChain:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        filters:
+          type: array
+          items:
+            $ref: '#/components/schemas/FilterModule'
+        isActive:
+          type: boolean
+        masterVolume:
+          type: number
+          format: float
+        bypassChain:
+          type: boolean
+
+    FilterModule:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+        isEnabled:
+          type: boolean
+        isBypassed:
+          type: boolean
+        isSolo:
+          type: boolean
+        wetMix:
+          type: number
+          format: float
+        parameters:
+          type: object
+          additionalProperties:
+            type: number
+        position:
+          type: integer
+
+    AddFilterRequest:
+      type: object
+      required:
+        - filterId
+      properties:
+        filterId:
+          type: string
+        position:
+          type: integer
+          minimum: 0
+
+    UpdateFilterParametersRequest:
+      type: object
+      required:
+        - parameters
+      properties:
+        parameters:
+          type: object
+          additionalProperties:
+            type: number
+
+    FilterControlRequest:
+      type: object
+      properties:
+        bypass:
+          type: boolean
+        solo:
+          type: boolean
+        wet:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+
+    OutputDevice:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+          enum: [local, roon, hqplayer, upnp, network]
+        ipAddress:
+          type: string
+        supportedFormats:
+          type: array
+          items:
+            type: string
+        capabilities:
+          $ref: '#/components/schemas/DeviceCapabilities'
+
+    DeviceCapabilities:
+      type: object
+      properties:
+        supportsDSD:
+          type: boolean
+        supportsPCM768:
+          type: boolean
+        maxChannels:
+          type: integer
+        maxBitrate:
+          type: integer
+        exclusiveFeatures:
+          type: array
+          items:
+            type: string
+
+    OutputDeviceStatus:
+      type: object
+      properties:
+        deviceId:
+          type: string
+        isConnected:
+          type: boolean
+        currentFormat:
+          type: string
+        latency:
+          type: integer
+        volume:
+          type: number
+          format: float
+
+    HardwareStatus:
+      type: object
+      properties:
+        gpu:
+          $ref: '#/components/schemas/GPUStatus'
+        npu:
+          $ref: '#/components/schemas/NPUStatus'
+        cpu:
+          $ref: '#/components/schemas/CPUStatus'
+        timestamp:
+          type: integer
+          format: int64
+
+    GPUStatus:
+      type: object
+      properties:
+        utilization:
+          type: number
+          format: float
+        memoryUsed:
+          type: integer
+        memoryTotal:
+          type: integer
+        temperature:
+          type: number
+          format: float
+        powerUsage:
+          type: number
+          format: float
+
+    NPUStatus:
+      type: object
+      properties:
+        utilization:
+          type: number
+          format: float
+        memoryUsed:
+          type: integer
+        powerUsage:
+          type: number
+          format: float
+
+    CPUStatus:
+      type: object
+      properties:
+        utilization:
+          type: number
+          format: float
+        cores:
+          type: array
+          items:
+            type: number
+          format: float
+        temperature:
+          type: number
+          format: float
+
+    LatencyAnalysis:
+      type: object
+      properties:
+        total:
+          type: number
+          format: float
+        breakdown:
+          type: object
+          properties:
+            input:
+              type: number
+              format: float
+            processing:
+              type: number
+              format: float
+            output:
+              type: number
+              format: float
+
+    SystemHealth:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, critical]
+        uptime:
+          type: integer
+        version:
+          type: string
+        components:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [healthy, degraded, critical]
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+              message:
+                type: string
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+              message:
+                type: string
+
+    PayloadTooLarge:
+      description: Request entity too large
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+              message:
+                type: string
+              maxSize:
+                type: string
+
+security:
+  - ApiKeyAuth: []
+
+securitySchemes:
+  ApiKeyAuth:
+    type: apiKey
+    in: header
+    name: X-API-Key

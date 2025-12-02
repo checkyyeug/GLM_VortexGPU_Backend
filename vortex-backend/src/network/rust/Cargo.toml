@@ -1,0 +1,67 @@
+[package]
+name = "vortex-network"
+version = "0.1.0"
+edition = "2021"
+authors = ["Vortex Audio Team"]
+description = "High-performance network services for Vortex GPU Audio Backend"
+
+[dependencies]
+# HTTP framework
+axum = "0.7"
+tokio = { version = "1.0", features = ["full"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
+hyper = "1.0"
+axum-server = "0.6"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# WebSocket support
+tokio-tungstenite = "0.20"
+futures-util = "0.3"
+
+# File handling
+mime = "0.3"
+mime_guess = "2.0"
+
+# Utilities
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+[profile.dev]
+debug = true
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[[test]]
+name = "unit_tests"
+path = "tests/unit_tests.rs"
+
+[[test]]
+name = "integration_tests"
+path = "tests/integration_tests.rs"
+
+[[test]]
+name = "contract_tests"
+path = "tests/contract_tests.rs"
+
+[[bench]]
+name = "performance_benchmarks"
+harness = false
+
+[[bench]]
+name = "network_benchmarks"
+harness = false

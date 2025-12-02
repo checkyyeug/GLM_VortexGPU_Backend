@@ -1,0 +1,554 @@
+#version 460 core
+// SPDX-License-Identifier: MIT
+// Vortex GPU Audio Backend - Waveform Analysis Compute Shader
+// Optimized for real-time audio waveform visualization with 60+ FPS performance
+
+// Workgroup size configuration
+layout(local_size_x = 256) in;
+
+// Input audio buffer (interleaved)
+layout(binding = 0) readonly buffer AudioBuffer {
+    float audioData[];
+};
+
+// Ring buffer for continuous audio input
+layout(binding = 1) buffer RingBuffer {
+    float ringBufferData[];
+};
+
+// Output waveform data for visualization
+layout(binding = 2) writeonly buffer WaveformBuffer {
+    float waveformPeaks[];
+    float waveformRMS[];
+    float waveformAverage[];
+    float waveformMin[];
+    float waveformMax[];
+};
+
+// Peak detection output
+layout(binding = 3) writeonly buffer PeakBuffer {
+    float peakValues[];
+    uint peakIndices[];
+};
+
+// Zero-crossing detection output
+layout(binding = 4) writeonly buffer ZeroCrossingBuffer {
+    uint zeroCrossingIndices[];
+};
+
+// Configuration constants
+layout(push_constant) uniform WaveformConfig {
+    uint numSamples;           // Number of samples per channel
+    uint numChannels;          // Number of audio channels
+    uint waveformLength;       // Output waveform length (pixels)
+    uint ringBufferSize;       // Ring buffer size
+    uint ringBufferWritePos;   // Current write position in ring buffer
+    uint channelIndex;         // Current channel being processed
+    float windowDuration;      // Window duration in seconds
+    float sampleRate;          // Audio sample rate
+    float decayRate;           // Peak decay rate (0.0 to 1.0)
+    float smoothingFactor;     // Smoothing filter coefficient
+    float peakHoldTime;        // Peak hold time in seconds
+    float compressionRatio;    // Logarithmic compression ratio
+    bool enablePeakDetection;  // Enable peak detection
+    bool enableRMS;            // Enable RMS calculation
+    bool enableZeroCrossing;   // Enable zero-crossing detection
+    bool enableSmoothing;      // Enable smoothing filter
+    bool enableCompression;    // Enable logarithmic compression
+    bool normalizeOutput;      // Normalize to 0.0-1.0 range
+    uint displayMode;          // Display mode (0=Peaks,1=RMS,2=Average,3=Instantaneous)
+    uint timeScale;            // Time scale mode (0=Linear,1=Logarithmic)
+} config;
+
+// Shared memory for efficient data processing
+shared float sharedAudio[512];
+shared float sharedPeaks[512];
+shared float sharedRMS[512];
+shared float sharedSmoothed[512];
+
+// Ring buffer state
+shared uint ringWritePos;
+shared uint ringReadPos;
+
+// High-performance mathematical functions
+
+// Fast absolute value approximation
+float fastAbs(float x) {
+    return abs(x);  // GPU hardware accelerated
+}
+
+// Fast square root approximation
+float fastSqrt(float x) {
+    return sqrt(x);  // GPU hardware accelerated
+}
+
+// Fast logarithm for compression
+float fastLog(float x) {
+    return log(max(x, 1e-6));
+}
+
+// Fast exponential for decompression
+float fastExp(float x) {
+    return exp(min(x, 80.0));  // Clamp to prevent overflow
+}
+
+// Logarithmic compression for better visualization
+float compressAmplitude(float amplitude) {
+    if (!config.enableCompression) {
+        return amplitude;
+    }
+
+    float compressed = fastLog(1.0 + amplitude * config.compressionRatio) /
+                      fastLog(1.0 + config.compressionRatio);
+    return compressed;
+}
+
+// Linear interpolation for smooth transitions
+float lerp(float a, float b, float t) {
+    return a + t * (b - a);
+}
+
+// Exponential smoothing filter
+float smoothFilter(float current, float previous, float alpha) {
+    return alpha * current + (1.0 - alpha) * previous;
+}
+
+// Peak detection with attack/release characteristics
+float processPeak(float input, float currentPeak, float attackCoeff, float releaseCoeff) {
+    if (input > currentPeak) {
+        return lerp(currentPeak, input, attackCoeff);
+    } else {
+        return lerp(currentPeak, input, releaseCoeff);
+    }
+}
+
+// RMS calculation for a block of samples
+float calculateRMSBlock(uint startIdx, uint blockSize) {
+    float sumSquares = 0.0;
+    uint count = 0;
+
+    for (uint i = 0; i < blockSize && (startIdx + i) < config.numSamples; i++) {
+        uint sampleIndex = (startIdx + i) * config.numChannels + config.channelIndex;
+        if (sampleIndex < audioData.length()) {
+            float sample = audioData[sampleIndex];
+            sumSquares += sample * sample;
+            count++;
+        }
+    }
+
+    return (count > 0) ? fastSqrt(sumSquares / count) : 0.0;
+}
+
+// Peak finding in a block of samples
+void findPeakInBlock(uint startIdx, uint blockSize, out float peakValue, out uint peakIndex) {
+    peakValue = 0.0;
+    peakIndex = startIdx;
+
+    for (uint i = 0; i < blockSize && (startIdx + i) < config.numSamples; i++) {
+        uint sampleIndex = (startIdx + i) * config.numChannels + config.channelIndex;
+        if (sampleIndex < audioData.length()) {
+            float absSample = fastAbs(audioData[sampleIndex]);
+            if (absSample > peakValue) {
+                peakValue = absSample;
+                peakIndex = startIdx + i;
+            }
+        }
+    }
+}
+
+// Zero-crossing detection
+bool isZeroCrossing(float prevSample, float currSample) {
+    return (prevSample < 0.0 && currSample >= 0.0) || (prevSample > 0.0 && currSample <= 0.0);
+}
+
+// Ring buffer management
+void writeToRingBuffer(float sample) {
+    uint writePos = atomicAdd(ringWritePos, 1) % config.ringBufferSize;
+    ringBufferData[writePos + config.channelIndex * config.ringBufferSize] = sample;
+}
+
+float readFromRingBuffer(uint readPos) {
+    uint pos = (ringReadPos + readPos) % config.ringBufferSize;
+    return ringBufferData[pos + config.channelIndex * config.ringBufferSize];
+}
+
+// Downsample audio for visualization
+void downsampleForVisualization() {
+    uint globalId = gl_GlobalInvocationID.x;
+    uint localId = gl_LocalInvocationID.x;
+    uint samplesPerPixel = config.numSamples / config.waveformLength;
+
+    if (globalId >= config.waveformLength) {
+        return;
+    }
+
+    uint startSample = globalId * samplesPerPixel;
+    uint endSample = min(startSample + samplesPerPixel, config.numSamples);
+
+    // Calculate peak, RMS, average, min, max for this pixel
+    float peak = 0.0;
+    float rms = 0.0;
+    float sum = 0.0;
+    float minVal = 1.0;
+    float maxVal = -1.0;
+    uint count = 0;
+
+    for (uint i = startSample; i < endSample; i++) {
+        uint sampleIndex = i * config.numChannels + config.channelIndex;
+        if (sampleIndex < audioData.length()) {
+            float sample = audioData[sampleIndex];
+            float absSample = fastAbs(sample);
+
+            peak = max(peak, absSample);
+            sum += sample;
+            minVal = min(minVal, sample);
+            maxVal = max(maxVal, sample);
+            count++;
+
+            if (config.enableRMS) {
+                rms += sample * sample;
+            }
+        }
+    }
+
+    // Calculate final values
+    float average = (count > 0) ? sum / count : 0.0;
+    if (config.enableRMS && count > 0) {
+        rms = fastSqrt(rms / count);
+    }
+
+    // Apply compression if enabled
+    if (config.enableCompression) {
+        peak = compressAmplitude(peak);
+        rms = compressAmplitude(rms);
+        average = compressAmplitude(fastAbs(average));
+        minVal = compressAmplitude(fastAbs(minVal)) * sign(minVal);
+        maxVal = compressAmplitude(fastAbs(maxVal)) * sign(maxVal);
+    }
+
+    // Normalize if requested
+    if (config.normalizeOutput) {
+        peak = min(peak, 1.0);
+        rms = min(rms, 1.0);
+        average = clamp(average, -1.0, 1.0);
+        minVal = clamp(minVal, -1.0, 1.0);
+        maxVal = clamp(maxVal, -1.0, 1.0);
+    }
+
+    // Write to output buffers
+    uint outputIndex = globalId + config.channelIndex * config.waveformLength;
+    waveformPeaks[outputIndex] = peak;
+    waveformRMS[outputIndex] = rms;
+    waveformAverage[outputIndex] = average;
+    waveformMin[outputIndex] = minVal;
+    waveformMax[outputIndex] = maxVal;
+}
+
+// Advanced peak detection with temporal smoothing
+void advancedPeakDetection() {
+    uint globalId = gl_GlobalInvocationID.x;
+
+    if (globalId >= config.waveformLength || !config.enablePeakDetection) {
+        return;
+    }
+
+    uint blockSize = config.numSamples / config.waveformLength;
+    uint startIdx = globalId * blockSize;
+
+    // Find current peak
+    float currentPeak;
+    uint currentPeakIdx;
+    findPeakInBlock(startIdx, blockSize, currentPeak, currentPeakIdx);
+
+    // Apply temporal smoothing
+    float attackCoeff = 0.8;  // Fast attack
+    float releaseCoeff = 1.0 - config.decayRate;  // Configurable release
+
+    uint outputIndex = globalId + config.channelIndex * config.waveformLength;
+    float previousPeak = peakValues[outputIndex];
+
+    float smoothedPeak = processPeak(currentPeak, previousPeak, attackCoeff, releaseCoeff);
+
+    // Write results
+    peakValues[outputIndex] = smoothedPeak;
+    peakIndices[outputIndex] = currentPeakIdx;
+}
+
+// Zero-crossing analysis for frequency estimation
+void zeroCrossingAnalysis() {
+    uint globalId = gl_GlobalInvocationID.x;
+
+    if (globalId >= config.waveformLength || !config.enableZeroCrossing) {
+        return;
+    }
+
+    uint blockSize = config.numSamples / config.waveformLength;
+    uint startIdx = globalId * blockSize;
+
+    uint crossingCount = 0;
+    float prevSample = 0.0;
+    bool firstSample = true;
+
+    for (uint i = 0; i < blockSize && (startIdx + i) < config.numSamples; i++) {
+        uint sampleIndex = (startIdx + i) * config.numChannels + config.channelIndex;
+        if (sampleIndex < audioData.length()) {
+            float currentSample = audioData[sampleIndex];
+
+            if (!firstSample && isZeroCrossing(prevSample, currentSample)) {
+                crossingCount++;
+            }
+
+            prevSample = currentSample;
+            firstSample = false;
+        }
+    }
+
+    // Store crossing indices (could be used for frequency analysis)
+    if (crossingCount > 0) {
+        uint outputIndex = globalId + config.channelIndex * config.waveformLength;
+        zeroCrossingIndices[outputIndex] = startIdx + crossingCount * blockSize / (2 * crossingCount);
+    }
+}
+
+// Envelope follower for smooth amplitude tracking
+void envelopeFollower() {
+    uint globalId = gl_GlobalInvocationID.x;
+    uint localId = gl_LocalInvocationID.x;
+
+    // Load audio samples into shared memory
+    uint samplesPerThread = config.numSamples / gl_WorkGroupSize.x;
+    uint startSample = localId * samplesPerThread;
+
+    for (uint i = 0; i < samplesPerThread && (startSample + i) < config.numSamples; i++) {
+        uint sampleIndex = (startSample + i) * config.numChannels + config.channelIndex;
+        if (sampleIndex < audioData.length()) {
+            sharedAudio[localId * samplesPerThread + i] = audioData[sampleIndex];
+        }
+    }
+
+    barrier();
+
+    // Apply envelope following
+    float envelope = 0.0;
+    float attackCoeff = 0.1;
+    float releaseCoeff = 0.999;
+
+    for (uint i = 0; i < samplesPerThread; i++) {
+        float sample = sharedAudio[localId * samplesPerThread + i];
+        float absSample = fastAbs(sample);
+
+        if (absSample > envelope) {
+            envelope = lerp(envelope, absSample, attackCoeff);
+        } else {
+            envelope = lerp(envelope, absSample, releaseCoeff);
+        }
+    }
+
+    // Store envelope value
+    sharedSmoothed[localId] = envelope;
+    barrier();
+}
+
+// Time scaling functions for different visualization modes
+void applyTimeScaling() {
+    uint globalId = gl_GlobalInvocationID.x;
+
+    if (globalId >= config.waveformLength) {
+        return;
+    }
+
+    float outputValue;
+
+    switch (config.displayMode) {
+        case 0: // Peaks
+            outputValue = waveformPeaks[globalId + config.channelIndex * config.waveformLength];
+            break;
+        case 1: // RMS
+            outputValue = waveformRMS[globalId + config.channelIndex * config.waveformLength];
+            break;
+        case 2: // Average
+            outputValue = waveformAverage[globalId + config.channelIndex * config.waveformLength];
+            break;
+        case 3: // Instantaneous
+            uint sampleIndex = globalId * config.numSamples / config.waveformLength;
+            sampleIndex = min(sampleIndex, config.numSamples - 1);
+            sampleIndex = sampleIndex * config.numChannels + config.channelIndex;
+            if (sampleIndex < audioData.length()) {
+                outputValue = audioData[sampleIndex];
+            } else {
+                outputValue = 0.0;
+            }
+            break;
+        default:
+            outputValue = 0.0;
+    }
+
+    // Apply time scaling if needed
+    if (config.timeScale == 1) { // Logarithmic time scaling
+        float logFactor = log(float(globalId + 1)) / log(float(config.waveformLength));
+        uint linearIndex = uint(logFactor * config.waveformLength);
+
+        // Blend between neighboring samples for smooth scaling
+        float t = (logFactor * config.waveformLength) - linearIndex;
+        float nextValue = 0.0;
+
+        if (linearIndex + 1 < config.waveformLength) {
+            switch (config.displayMode) {
+                case 0: nextValue = waveformPeaks[linearIndex + 1 + config.channelIndex * config.waveformLength]; break;
+                case 1: nextValue = waveformRMS[linearIndex + 1 + config.channelIndex * config.waveformLength]; break;
+                case 2: nextValue = waveformAverage[linearIndex + 1 + config.channelIndex * config.waveformLength]; break;
+            }
+        }
+
+        outputValue = lerp(outputValue, nextValue, t);
+    }
+
+    // Write final value back to buffer
+    switch (config.displayMode) {
+        case 0: waveformPeaks[globalId + config.channelIndex * config.waveformLength] = outputValue; break;
+        case 1: waveformRMS[globalId + config.channelIndex * config.waveformLength] = outputValue; break;
+        case 2: waveformAverage[globalId + config.channelIndex * config.waveformLength] = outputValue; break;
+    }
+}
+
+// Main compute shader entry point
+void main() {
+    uint globalId = gl_GlobalInvocationID.x;
+    uint localId = gl_LocalInvocationID.x;
+    uint workgroupId = gl_WorkGroupID.x;
+
+    // Each workgroup processes one channel
+    uint channel = workgroupId % config.numChannels;
+    if (channel != config.channelIndex) {
+        return;
+    }
+
+    // Initialize ring buffer position
+    if (localId == 0) {
+        ringWritePos = config.ringBufferWritePos;
+        ringReadPos = 0;  // Start from beginning of window
+    }
+
+    barrier();
+
+    // Main waveform processing
+    downsampleForVisualization();
+
+    // Additional analyses based on configuration
+    if (config.enablePeakDetection) {
+        advancedPeakDetection();
+    }
+
+    if (config.enableZeroCrossing) {
+        zeroCrossingAnalysis();
+    }
+
+    // Apply smoothing if enabled
+    if (config.enableSmoothing) {
+        envelopeFollower();
+
+        // Apply smoothing to outputs
+        if (globalId < config.waveformLength) {
+            uint outputIndex = globalId + config.channelIndex * config.waveformLength;
+
+            float smoothedPeak = smoothFilter(
+                waveformPeaks[outputIndex],
+                sharedSmoothed[localId],
+                config.smoothingFactor
+            );
+
+            waveformPeaks[outputIndex] = smoothedPeak;
+        }
+    }
+
+    barrier();
+
+    // Apply time scaling as final step
+    applyTimeScaling();
+}
+
+// Specialized utility functions for performance optimization
+
+// Vectorized operations for processing multiple samples
+void vectorizedProcessing() {
+    // Process 4 samples at a time for better memory bandwidth
+    uint vectorSize = 4;
+    uint vectorsPerThread = config.numSamples / (gl_WorkGroupSize.x * vectorSize);
+
+    for (uint v = 0; v < vectorsPerThread; v++) {
+        uint baseIdx = (gl_LocalInvocationID.x * vectorsPerThread + v) * vectorSize;
+
+        // Load 4 samples
+        vec4 samples = vec4(
+            audioData[baseIdx],
+            audioData[baseIdx + 1],
+            audioData[baseIdx + 2],
+            audioData[baseIdx + 3]
+        );
+
+        // Vectorized peak detection
+        vec4 absSamples = abs(samples);
+        float peak = max(max(absSamples.x, absSamples.y), max(absSamples.z, absSamples.w));
+
+        // Vectorized RMS calculation
+        float rms = length(samples) * 0.5;  // sqrt(x^2 + y^2 + z^2 + w^2) / 2
+
+        // Store results
+        if (baseIdx < config.numSamples) {
+            sharedAudio[gl_LocalInvocationID.x] = peak;
+            sharedRMS[gl_LocalInvocationID.x] = rms;
+        }
+    }
+}
+
+// Memory coalescing optimization
+void optimizedMemoryAccess() {
+    // Ensure memory accesses are aligned and coalesced
+    uint stride = config.numChannels;
+    uint alignedStart = (config.numSamples / gl_WorkGroupSize.x) * gl_WorkGroupSize.x;
+
+    for (uint i = gl_LocalInvocationID.x; i < alignedStart; i += gl_WorkGroupSize.x) {
+        uint index = i * stride + config.channelIndex;
+
+        if (index < audioData.length()) {
+            // Load sample
+            float sample = audioData[index];
+
+            // Process based on configuration
+            if (config.enablePeakDetection) {
+                sharedPeaks[gl_LocalInvocationID.x] = fastAbs(sample);
+            }
+
+            if (config.enableRMS) {
+                sharedRMS[gl_LocalInvocationID.x] = sample * sample;
+            }
+        }
+    }
+
+    barrier();
+}
+
+// Atomic operations for thread synchronization
+void synchronizedProcessing() {
+    // Use atomic operations for peak detection across threads
+    uint localPeakIdx = 0;
+    float localPeakValue = 0.0;
+
+    // Each thread finds local peak
+    uint samplesPerThread = config.numSamples / gl_WorkGroupSize.x;
+    uint startIdx = gl_LocalInvocationID.x * samplesPerThread;
+
+    for (uint i = 0; i < samplesPerThread && (startIdx + i) < config.numSamples; i++) {
+        uint sampleIndex = (startIdx + i) * config.numChannels + config.channelIndex;
+        if (sampleIndex < audioData.length()) {
+            float absSample = fastAbs(audioData[sampleIndex]);
+            if (absSample > localPeakValue) {
+                localPeakValue = absSample;
+                localPeakIdx = startIdx + i;
+            }
+        }
+    }
+
+    // Atomic compare-and-swap for global peak
+    // (This would need proper atomic float support or use atomic max on integer representation)
+}

@@ -1,0 +1,458 @@
+#version 460 core
+
+// Workgroup dimensions
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// Buffer bindings
+layout(std430, binding = 0) readonly buffer InputData {
+    float audio_samples[];          // Input audio samples
+    uint sample_count;              // Number of samples in buffer
+    uint sample_rate;               // Audio sample rate
+    uint channels;                  // Number of audio channels
+    uint frame_size;                // Audio frame size
+    float processing_start_time;    // Processing start timestamp
+    float current_time;             // Current timestamp
+};
+
+layout(std430, binding = 1) readonly buffer StageData {
+    uint stage_count;               // Number of processing stages
+    float stage_processing_times[]; // Processing times per stage (microseconds)
+    uint stage_queue_sizes[];       // Queue sizes per stage
+    uint stage_call_counts[];       // Call counts per stage
+    uint stage_success_counts[];    // Success counts per stage
+};
+
+layout(std430, binding = 2) readonly buffer ResourceData {
+    float cpu_utilization;          // CPU utilization percentage
+    float gpu_utilization;          // GPU utilization percentage
+    uint64_t memory_used;           // Memory used in bytes
+    uint64_t memory_total;          // Total memory in bytes
+    uint64_t gpu_memory_used;       // GPU memory used in bytes
+    uint64_t gpu_memory_total;      // Total GPU memory in bytes
+    float gpu_temperature;          // GPU temperature in Celsius
+    uint active_threads;            // Active thread count
+    uint total_threads;             // Total thread count
+};
+
+layout(std430, binding = 3) writeonly buffer MetricsOutput {
+    // Timing metrics
+    float frame_processing_time_ms;
+    float max_frame_processing_time_ms;
+    float min_frame_processing_time_ms;
+    float pipeline_latency_ms;
+    float audio_buffer_latency_ms;
+    float audio_buffer_fill_ratio;
+
+    // Throughput metrics
+    float samples_per_second;
+    float frames_per_second;
+    float real_time_factor;
+    float io_bytes_per_second;
+    float cpu_instructions_per_second;
+    float gpu_flops_per_second;
+
+    // Resource metrics
+    float memory_utilization_percent;
+    float gpu_memory_utilization_percent;
+    float thread_utilization_percent;
+    float thermal_efficiency_score;
+
+    // Pipeline metrics
+    uint active_stages;
+    float average_stage_latency_us;
+    float pipeline_efficiency_percent;
+    float bottleneck_factor;
+    float max_queue_size;
+    float average_queue_size;
+
+    // QoS metrics
+    float real_time_score;
+    float audio_latency_ms;
+    float deadline_miss_rate_percent;
+    float quality_score;
+    float stability_index;
+
+    // Performance indicators
+    float overall_efficiency;
+    float performance_trend;
+    float prediction_confidence;
+    uint anomaly_flags;
+};
+
+// Configuration constants
+const float MAX_ACCEPTABLE_LATENCY_MS = 16.0f;  // 16ms for 60fps
+const float MAX_ACCEPTABLE_TEMP_C = 85.0f;       // 85°C max temperature
+const float EFFICIENCY_TARGET = 0.8f;           // 80% efficiency target
+
+// Utility functions
+float calculate_average_execution_time() {
+    float total_time = 0.0f;
+    uint active_stages = 0;
+
+    for (uint i = 0; i < stage_count && i < 32; ++i) {
+        if (stage_processing_times[i] > 0.0f) {
+            total_time += stage_processing_times[i];
+            active_stages++;
+        }
+    }
+
+    return active_stages > 0 ? total_time / active_stages : 0.0f;
+}
+
+float calculate_max_execution_time() {
+    float max_time = 0.0f;
+
+    for (uint i = 0; i < stage_count && i < 32; ++i) {
+        max_time = max(max_time, stage_processing_times[i]);
+    }
+
+    return max_time;
+}
+
+float calculate_min_execution_time() {
+    float min_time = float(0xFFFFFFFF); // Initialize to max value
+
+    for (uint i = 0; i < stage_count && i < 32; ++i) {
+        if (stage_processing_times[i] > 0.0f) {
+            min_time = min(min_time, stage_processing_times[i]);
+        }
+    }
+
+    return min_time == float(0xFFFFFFFF) ? 0.0f : min_time;
+}
+
+float calculate_pipeline_latency() {
+    float total_latency = 0.0f;
+    uint active_stages = 0;
+
+    for (uint i = 0; i < stage_count && i < 32; ++i) {
+        if (stage_processing_times[i] > 0.0f) {
+            total_latency += stage_processing_times[i] + (stage_queue_sizes[i] * 0.001f); // Queue impact
+            active_stages++;
+        }
+    }
+
+    return total_latency / 1000.0f; // Convert to milliseconds
+}
+
+float calculate_audio_buffer_metrics() {
+    if (frame_size == 0 || sample_rate == 0) {
+        return 0.0f;
+    }
+
+    // Calculate buffer fill ratio based on processing time vs real-time requirement
+    float frame_time_ms = (float(frame_size) / sample_rate) * 1000.0f;
+    float actual_processing_time = current_time - processing_start_time;
+
+    return frame_time_ms > 0.0f ? actual_processing_time / frame_time_ms : 0.0f;
+}
+
+float calculate_throughput_metrics() {
+    // Calculate samples per second
+    samples_per_second = float(sample_rate) * float(channels);
+
+    // Calculate frames per second
+    frames_per_second = frame_size > 0 ? float(sample_rate) / float(frame_size) : 0.0f;
+
+    // Calculate real-time factor (processing time / real-time requirement)
+    float frame_time_ms = (float(frame_size) / sample_rate) * 1000.0f;
+    real_time_factor = frame_time_ms > 0.0f ? frame_processing_time_ms / frame_time_ms : 0.0f;
+
+    // Estimate I/O throughput (simplified)
+    io_bytes_per_second = samples_per_second * sizeof(float);
+
+    // Estimate CPU instruction throughput (simplified assumption)
+    cpu_instructions_per_second = samples_per_second * 100.0f; // Assume 100 instructions per sample
+
+    // Estimate GPU FLOPS (simplified based on GPU utilization)
+    gpu_flops_per_second = gpu_utilization * 1e12f; // Assume 1 TFLOPS peak
+
+    return samples_per_second;
+}
+
+float calculate_resource_utilization() {
+    // Memory utilization
+    memory_utilization_percent = memory_total > 0 ?
+        (float(memory_used) / float(memory_total)) * 100.0f : 0.0f;
+
+    // GPU memory utilization
+    gpu_memory_utilization_percent = gpu_memory_total > 0 ?
+        (float(gpu_memory_used) / float(gpu_memory_total)) * 100.0f : 0.0f;
+
+    // Thread utilization
+    thread_utilization_percent = total_threads > 0 ?
+        (float(active_threads) / float(total_threads)) * 100.0f : 0.0f;
+
+    // Thermal efficiency score (inverse relationship with temperature)
+    thermal_efficiency_score = gpu_temperature > 0.0f ?
+        max(0.0f, 1.0f - (gpu_temperature / MAX_ACCEPTABLE_TEMP_C)) : 1.0f;
+
+    return (memory_utilization_percent + gpu_memory_utilization_percent + thread_utilization_percent) / 3.0f;
+}
+
+float calculate_pipeline_efficiency() {
+    // Count active stages
+    active_stages = 0;
+    for (uint i = 0; i < stage_count && i < 32; ++i) {
+        if (stage_processing_times[i] > 0.0f) {
+            active_stages++;
+        }
+    }
+
+    // Calculate average stage latency
+    average_stage_latency_us = calculate_average_execution_time();
+
+    // Calculate pipeline efficiency (success rate)
+    uint total_calls = 0, total_success = 0;
+    for (uint i = 0; i < stage_count && i < 32; ++i) {
+        total_calls += stage_call_counts[i];
+        total_success += stage_success_counts[i];
+    }
+
+    pipeline_efficiency_percent = total_calls > 0 ?
+        (float(total_success) / float(total_calls)) * 100.0f : 100.0f;
+
+    // Calculate bottleneck factor (ratio of max to average processing time)
+    float avg_time = calculate_average_execution_time();
+    float max_time = calculate_max_execution_time();
+    bottleneck_factor = avg_time > 0.0f ? max_time / avg_time : 1.0f;
+
+    // Calculate queue metrics
+    max_queue_size = 0.0f;
+    float total_queue = 0.0f;
+    uint queue_count = 0;
+
+    for (uint i = 0; i < stage_count && i < 32; ++i) {
+        max_queue_size = max(max_queue_size, float(stage_queue_sizes[i]));
+        total_queue += float(stage_queue_sizes[i]);
+        if (stage_processing_times[i] > 0.0f) {
+            queue_count++;
+        }
+    }
+
+    average_queue_size = queue_count > 0 ? total_queue / queue_count : 0.0f;
+
+    return pipeline_efficiency_percent;
+}
+
+float calculate_qos_metrics() {
+    // Real-time score based on multiple factors
+    float latency_score = max(0.0f, 100.0f - (frame_processing_time_ms / MAX_ACCEPTABLE_LATENCY_MS) * 100.0f);
+    float efficiency_score = pipeline_efficiency_percent;
+    float thermal_score = thermal_efficiency_score * 100.0f;
+    float resource_score = max(0.0f, 100.0f - max(memory_utilization_percent, gpu_memory_utilization_percent));
+
+    real_time_score = (latency_score + efficiency_score + thermal_score + resource_score) / 4.0f;
+
+    // Audio latency estimation
+    audio_latency_ms = pipeline_latency_ms + frame_processing_time_ms;
+
+    // Deadline miss rate estimation
+    deadline_miss_rate_percent = real_time_factor > 1.0f ?
+        (real_time_factor - 1.0f) * 100.0f : 0.0f;
+
+    // Quality score (combination of efficiency and real-time performance)
+    quality_score = (real_time_score + pipeline_efficiency_percent) / 2.0f;
+
+    // Stability index (based on variance in processing times)
+    float avg_time = calculate_average_execution_time();
+    float max_time = calculate_max_execution_time();
+    float min_time = calculate_min_execution_time();
+    float variance = avg_time > 0.0f ? (max_time - min_time) / avg_time : 0.0f;
+    stability_index = max(0.0f, 1.0f - variance);
+
+    return real_time_score;
+}
+
+float calculate_performance_indicators() {
+    // Overall efficiency (weighted combination of metrics)
+    float timing_efficiency = frame_processing_time_ms > 0.0f ?
+        min(1.0f, MAX_ACCEPTABLE_LATENCY_MS / frame_processing_time_ms) : 0.0f;
+    float resource_efficiency = (100.0f - max(memory_utilization_percent, gpu_memory_utilization_percent)) / 100.0f;
+    float pipeline_efficiency = pipeline_efficiency_percent / 100.0f;
+    float qos_efficiency = real_time_score / 100.0f;
+
+    overall_efficiency = (timing_efficiency + resource_efficiency + pipeline_efficiency + qos_efficiency) / 4.0f;
+
+    // Performance trend (simplified - would need historical data for real implementation)
+    // This is a placeholder that would be calculated based on trend analysis
+    performance_trend = 0.0f; // Neutral trend
+
+    // Prediction confidence (based on stability of metrics)
+    prediction_confidence = stability_index;
+
+    // Anomaly flags (bit field for different types of anomalies)
+    anomaly_flags = 0;
+    if (frame_processing_time_ms > MAX_ACCEPTABLE_LATENCY_MS) {
+        anomaly_flags |= 1; // High latency flag
+    }
+    if (memory_utilization_percent > 90.0f) {
+        anomaly_flags |= 2; // High memory usage flag
+    }
+    if (gpu_temperature > MAX_ACCEPTABLE_TEMP_C) {
+        anomaly_flags |= 4; // High temperature flag
+    }
+    if (real_time_factor > 1.2f) {
+        anomaly_flags |= 8; // Real-time violation flag
+    }
+    if (pipeline_efficiency_percent < 80.0f) {
+        anomaly_flags |= 16; // Low pipeline efficiency flag
+    }
+
+    return overall_efficiency;
+}
+
+shared void calculate_metrics(uint global_id) {
+    // Reset metrics
+    if (global_id == 0) {
+        frame_processing_time_ms = 0.0f;
+        max_frame_processing_time_ms = 0.0f;
+        min_frame_processing_time_ms = 0.0f;
+        pipeline_latency_ms = 0.0f;
+        audio_buffer_latency_ms = 0.0f;
+        audio_buffer_fill_ratio = 0.0f;
+        samples_per_second = 0.0f;
+        frames_per_second = 0.0f;
+        real_time_factor = 0.0f;
+        io_bytes_per_second = 0.0f;
+        cpu_instructions_per_second = 0.0f;
+        gpu_flops_per_second = 0.0f;
+        memory_utilization_percent = 0.0f;
+        gpu_memory_utilization_percent = 0.0f;
+        thread_utilization_percent = 0.0f;
+        thermal_efficiency_score = 0.0f;
+        active_stages = 0;
+        average_stage_latency_us = 0.0f;
+        pipeline_efficiency_percent = 0.0f;
+        bottleneck_factor = 0.0f;
+        max_queue_size = 0.0f;
+        average_queue_size = 0.0f;
+        real_time_score = 0.0f;
+        audio_latency_ms = 0.0f;
+        deadline_miss_rate_percent = 0.0f;
+        quality_score = 0.0f;
+        stability_index = 0.0f;
+        overall_efficiency = 0.0f;
+        performance_trend = 0.0f;
+        prediction_confidence = 0.0f;
+        anomaly_flags = 0;
+    }
+
+    barrier();
+
+    if (global_id == 0) {
+        // Calculate timing metrics
+        frame_processing_time_ms = (current_time - processing_start_time) * 1000.0f; // Convert to ms
+        max_frame_processing_time_ms = calculate_max_execution_time() / 1000.0f;
+        min_frame_processing_time_ms = calculate_min_execution_time() / 1000.0f;
+        pipeline_latency_ms = calculate_pipeline_latency();
+        audio_buffer_latency_ms = frame_processing_time_ms; // Simplified
+        audio_buffer_fill_ratio = calculate_audio_buffer_metrics();
+
+        // Calculate throughput metrics
+        calculate_throughput_metrics();
+
+        // Calculate resource utilization
+        calculate_resource_utilization();
+
+        // Calculate pipeline efficiency
+        calculate_pipeline_efficiency();
+
+        // Calculate QoS metrics
+        calculate_qos_metrics();
+
+        // Calculate overall performance indicators
+        calculate_performance_indicators();
+    }
+}
+
+void main() {
+    uint global_id = gl_GlobalInvocationID.x;
+
+    // Only process if we have valid input data
+    if (sample_count > 0 && stage_count > 0) {
+        calculate_metrics(global_id);
+    }
+}
+
+// Advanced audio analysis functions
+float calculate_rms_level(uint start_sample, uint length) {
+    float sum_squares = 0.0f;
+    uint end_sample = min(start_sample + length, sample_count);
+
+    for (uint i = start_sample; i < end_sample; ++i) {
+        float sample = audio_samples[i];
+        sum_squares += sample * sample;
+    }
+
+    uint count = end_sample - start_sample;
+    return count > 0 ? sqrt(sum_squares / count) : 0.0f;
+}
+
+float calculate_peak_level(uint start_sample, uint length) {
+    float peak = 0.0f;
+    uint end_sample = min(start_sample + length, sample_count);
+
+    for (uint i = start_sample; i < end_sample; ++i) {
+        float abs_sample = abs(audio_samples[i]);
+        peak = max(peak, abs_sample);
+    }
+
+    return peak;
+}
+
+float calculate_zero_crossing_rate(uint start_sample, uint length) {
+    uint crossings = 0;
+    uint end_sample = min(start_sample + length, sample_count);
+
+    if (start_sample < end_sample) {
+        float prev_sample = audio_samples[start_sample];
+
+        for (uint i = start_sample + 1; i < end_sample; ++i) {
+            float curr_sample = audio_samples[i];
+            if ((prev_sample >= 0.0f && curr_sample < 0.0f) ||
+                (prev_sample < 0.0f && curr_sample >= 0.0f)) {
+                crossings++;
+            }
+            prev_sample = curr_sample;
+        }
+    }
+
+    uint count = end_sample - start_sample - 1;
+    return count > 0 ? float(crossings) / float(count) : 0.0f;
+}
+
+// Performance optimization helpers
+bool is_power_of_two(uint x) {
+    return x != 0 && (x & (x - 1)) == 0;
+}
+
+uint next_power_of_two(uint x) {
+    if (is_power_of_two(x)) {
+        return x;
+    }
+
+    x |= x >> 1;
+    x |= x >> 2;
+    x |= x >> 4;
+    x |= x >> 8;
+    x |= x >> 16;
+    x++;
+
+    return x;
+}
+
+// Memory barrier for synchronization
+void memory_barrier() {
+    memoryBarrier();
+    barrier();
+}
+
+// Atomic operations for thread-safe metrics
+atomic_uint atomic_metrics_accumulator;
+
+void atomic_add_metric(uint metric_index, float value) {
+    // Convert float to integer representation for atomic operations
+    uint int_value = floatBitsToUint(value);
+    atomicAdd(atomic_metrics_accumulator, int_value);
+}
